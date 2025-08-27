@@ -81,10 +81,9 @@
 //!    gut instinct is "no" (we can get by with "smart pointers"), but it
 //!    would certainly simplify some things...
 use crate::{
-    Error,
+    Error, wrapped_reducer,
     wrapped_reducer::{
-        BinEdgeSpec, Config, SpatialInfo, ValidatedBinEdgeVec, WrappedReducerNew,
-        wrapped_reducer_from_config,
+        BinEdgeSpec, Config, SpatialInfo, ValidatedBinEdgeVec, reducer_kind_from_config,
     },
 };
 use std::collections::HashMap;
@@ -125,7 +124,7 @@ impl Accumulator {
     /// update `accum_state` accordingly
     pub fn merge(&mut self, other: &Accumulator) -> Result<(), Error> {
         if self.descr == other.descr {
-            self.descr.reducer.merge(
+            wrapped_reducer::op::merge(
                 &mut self.data.mut_view(),
                 &other.data.view(),
                 &self.descr.config,
@@ -142,16 +141,12 @@ impl Accumulator {
     /// # Note
     /// We should probably let the caller provide the output memory.
     pub fn get_output(&self) -> HashMap<&'static str, Vec<f64>> {
-        self.descr
-            .reducer
-            .get_output(&self.data.view(), &self.descr.config)
+        wrapped_reducer::op::get_output(&self.data.view(), &self.descr.config)
     }
 
     /// Reset the tracked accumulator state
     pub fn reset_data(&mut self) {
-        self.descr
-            .reducer
-            .reset_full_statepack(&mut self.data.mut_view(), &self.descr.config);
+        wrapped_reducer::op::reset_full_statepack(&mut self.data.mut_view(), &self.descr.config);
     }
 }
 
@@ -178,7 +173,7 @@ impl Accumulator {
         &mut self,
         spatial_info: SpatialInfo<'a>,
     ) -> Result<(), Error> {
-        self.descr.reducer.exec_reduction(
+        wrapped_reducer::op::exec_reduction(
             &mut self.data.mut_view(),
             spatial_info,
             &self.descr.config,
@@ -234,16 +229,12 @@ impl AccumulatorData {
 /// Encapsulates the accumulator properties
 struct AccumulatorDescr {
     config: Config,
-    reducer: WrappedReducerNew,
 }
 
 impl Clone for AccumulatorDescr {
     fn clone(&self) -> AccumulatorDescr {
         AccumulatorDescr {
             config: self.config.clone(),
-            // since self was already constructed from self.config, we should
-            // be able to construct the new instance from config
-            reducer: wrapped_reducer_from_config(&self.config).expect("there is a bug"),
         }
     }
 }
@@ -400,10 +391,12 @@ impl AccumulatorBuilder {
             squared_distance_bin_edges,
         );
 
-        let reducer = wrapped_reducer_from_config(&config)?;
-        let descr = AccumulatorDescr { config, reducer };
+        // verify that the Config corresponds to a valid reducer configuration
+        let _ = reducer_kind_from_config(&config)?;
 
-        let state_size = descr.reducer.accum_state_size(&descr.config) as usize;
+        let descr = AccumulatorDescr { config };
+
+        let state_size = wrapped_reducer::op::accum_state_size(&descr.config) as usize;
         let data = AccumulatorData {
             data: vec![0.0; state_size * n_state],
             n_state,

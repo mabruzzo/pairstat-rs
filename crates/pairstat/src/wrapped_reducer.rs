@@ -7,13 +7,13 @@
 use crate::{
     Error,
     apply::{apply_accum, apply_cartesian},
-    reducers::{EuclideanNormHistogram, EuclideanNormMean, get_output},
+    reducers::{EuclideanNormHistogram, EuclideanNormMean},
 };
 
 use pairstat_nostd_internal::{
     BinEdges, CartesianBlock, CellWidth, ComponentSumHistogram, ComponentSumMean,
     IrregularBinEdges, PairOperation, Reducer, RegularBinEdges, StatePackView, StatePackViewMut,
-    UnstructuredPoints, merge_full_statepacks, reset_full_statepack, validate_bin_edges,
+    UnstructuredPoints, merge_full_statepacks, validate_bin_edges,
 };
 use std::{collections::HashMap, sync::LazyLock};
 
@@ -229,7 +229,7 @@ fn make_reducer(config: &Config) -> ReducerKind {
 
 /// constructs the appropriate [`WrappedReducer`] trait object that
 /// corresponds to the specified configuration
-fn reducer_kind_from_config(config: &Config) -> Result<ReducerKind, Error> {
+pub(crate) fn reducer_kind_from_config(config: &Config) -> Result<ReducerKind, Error> {
     let name = &config.reducer_name;
     if let Some(func) = REDUCER_MAKER_REGISTRY.get(name) {
         func.0(config)
@@ -241,43 +241,38 @@ fn reducer_kind_from_config(config: &Config) -> Result<ReducerKind, Error> {
     }
 }
 
-/// constructs the appropriate [`WrappedReducer`] trait object that
-/// corresponds to the specified configuration
-pub(crate) fn wrapped_reducer_from_config(config: &Config) -> Result<WrappedReducerNew, Error> {
-    // confirm we can build a ReducerKind
-    let _ = reducer_kind_from_config(config)?;
-    Ok(WrappedReducerNew)
-}
+pub(crate) mod op {
+    use super::*;
 
-/// Takes a Calls function (`func`) on:
-///   - the reducer expression (this can be refer to a variable holding a
-///     reducer or be an expression that returns a reducer)
-///   - other arguments (passed as arguments to `forward_reducer`)
-///
-/// Examples:
-/// ```text
-/// forward_reducer!(make_reducer(config); func(reducer_ref, other_arg1, other_arg2));
-/// # trailing comma is necessary for unary functions!
-/// forward_reducer!(make_reducer(config); func(reducer_ref,));
-/// ```
-macro_rules! forward_reducer{
-    ($reducer:expr; $func:ident(reducer_ref, $($args:expr),*)) => {
-        {
-            match $reducer {
-                ReducerKind::TPCFMean(r) => $func(&r, $($args),*),
-                ReducerKind::TPCFHistRegular(r) =>  $func(&r, $($args),*),
-                ReducerKind::TPCFHistIrregular(r) =>  $func(&r, $($args),*),
-                ReducerKind::AstroSF1Mean(r) =>  $func(&r, $($args),*),
-                ReducerKind::AstroSF1HistRegular(r) =>  $func(&r, $($args),*),
-                ReducerKind::AstroSF1HistIrregular(r) =>  $func(&r, $($args),*),
+    use crate::reducers::get_output as reducers_get_output;
+    use pairstat_nostd_internal::reset_full_statepack as internal_reset_full_statepack;
+
+    /// Takes a Calls function (`func`) on:
+    ///   - the reducer expression (this can be refer to a variable holding a
+    ///     reducer or be an expression that returns a reducer)
+    ///   - other arguments (passed as arguments to `forward_reducer`)
+    ///
+    /// Examples:
+    /// ```text
+    /// forward_reducer!(make_reducer(config); func(reducer_ref, other_arg1, other_arg2));
+    /// # trailing comma is necessary for unary functions!
+    /// forward_reducer!(make_reducer(config); func(reducer_ref,));
+    /// ```
+    macro_rules! forward_reducer{
+        ($reducer:expr; $func:ident(reducer_ref, $($args:expr),*)) => {
+            {
+                match $reducer {
+                    ReducerKind::TPCFMean(r) => $func(&r, $($args),*),
+                    ReducerKind::TPCFHistRegular(r) =>  $func(&r, $($args),*),
+                    ReducerKind::TPCFHistIrregular(r) =>  $func(&r, $($args),*),
+                    ReducerKind::AstroSF1Mean(r) =>  $func(&r, $($args),*),
+                    ReducerKind::AstroSF1HistRegular(r) =>  $func(&r, $($args),*),
+                    ReducerKind::AstroSF1HistIrregular(r) =>  $func(&r, $($args),*),
+                }
             }
         }
     }
-}
 
-pub(crate) struct WrappedReducerNew;
-
-impl WrappedReducerNew {
     /// merge the state information tracked by `binned_statepack` and
     /// `other_binned_statepack`, and update `binned_statepack` accordingly
     ///
@@ -286,7 +281,6 @@ impl WrappedReducerNew {
     /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
     /// implement the [`WrappedIrregularHist`] type
     pub(crate) fn merge(
-        &self,
         binned_statepack: &mut StatePackViewMut,
         other_binned_statepack: &StatePackView,
         config: &Config,
@@ -305,12 +299,11 @@ impl WrappedReducerNew {
     /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
     /// implement the [`WrappedIrregularHist`] type
     pub(crate) fn get_output(
-        &self,
         binned_statepack: &StatePackView,
         config: &Config,
     ) -> HashMap<&'static str, Vec<f64>> {
         forward_reducer!(
-            make_reducer(config); get_output(reducer_ref, binned_statepack)
+            make_reducer(config); reducers_get_output(reducer_ref, binned_statepack)
         )
     }
 
@@ -320,13 +313,9 @@ impl WrappedReducerNew {
     /// The `config` argument **must** be identical to the value passed
     /// into [`wrapped_reducer_from_config`]. it is _only_ used to help
     /// implement the [`wrappedirregularhist`] type
-    pub(crate) fn reset_full_statepack(
-        &self,
-        binned_statepack: &mut StatePackViewMut,
-        config: &Config,
-    ) {
+    pub(crate) fn reset_full_statepack(binned_statepack: &mut StatePackViewMut, config: &Config) {
         forward_reducer!(
-            make_reducer(config); reset_full_statepack(reducer_ref, binned_statepack)
+            make_reducer(config); internal_reset_full_statepack(reducer_ref, binned_statepack)
         )
     }
 
@@ -344,7 +333,7 @@ impl WrappedReducerNew {
     /// The `config` argument **must** be identical to the value passed
     /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
     /// implement the [`WrappedIrregularHist`] type
-    pub(crate) fn accum_state_size(&self, config: &Config) -> usize {
+    pub(crate) fn accum_state_size(config: &Config) -> usize {
         // this can't be a closure and accept a generic arg
         fn f(reducer: &impl Reducer) -> usize {
             reducer.accum_state_size()
@@ -378,7 +367,6 @@ impl WrappedReducerNew {
     /// function would still need to have access to all the enum's details
     /// (in order to perform a match over every variant)
     pub(crate) fn exec_reduction(
-        &self,
         binned_statepack: &mut StatePackViewMut,
         spatial_info: SpatialInfo,
         config: &Config,
@@ -399,7 +387,7 @@ impl WrappedReducerNew {
     }
 }
 
-enum ReducerKind<'a> {
+pub(crate) enum ReducerKind<'a> {
     TPCFMean(ComponentSumMean),
     TPCFHistRegular(ComponentSumHistogram<RegularBinEdges>),
     TPCFHistIrregular(ComponentSumHistogram<IrregularBinEdges<'a>>),
