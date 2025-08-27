@@ -148,6 +148,10 @@ struct ReducerKindFnHolder(fn(&Config) -> Result<ReducerKind<'_>, Error>);
 /// functions that construct the appropriate boxed [`ReducerKind`] instance
 fn build_registry() -> HashMap<String, ReducerKindFnHolder> {
     let out: HashMap<String, ReducerKindFnHolder> = HashMap::from([
+        // TODO hist_cf and 2pcf can be combined, with the behavior depending on
+        // whether or not config.hist_reducer_bucket is Some.
+        // Likewise for hist_astro and astro_sf1
+
         // -------------------------------------------------
         // define mappings for correlation function reducers
         // -------------------------------------------------
@@ -245,150 +249,6 @@ pub(crate) fn wrapped_reducer_from_config(config: &Config) -> Result<WrappedRedu
     Ok(WrappedReducerNew)
 }
 
-/// A trait that primarily wraps a [`Reducer`] type in order to support
-/// dynamic dispatch.
-///
-/// The main purpose of this function is to help implement the
-/// [`crate::AccumulatorDescr`] type.
-///
-/// # Dynamic Dispatch vs "Enum Dispatch"
-///
-/// There isn't a particularly strong reason behind our choice of dynamic
-/// dispatch. We summarize some considerations down below, but we are very
-/// willing to change the implementation.
-///
-/// Our initial choice was primarily influenced by some concerns about an
-/// enum-dispatch approach:
-/// - I was originally concerned that enum-dispatch may not work very well
-///   with the dynamic plugin approach (for GPU support) that is briefly
-///   described in the module-level documentation of [`crate::accumulator`].
-///   Upon reflection, I realized that if [`AccumulatorDescr`] continues to
-///   treat the [`Config`] type in a similar way to its current treatment
-///   (i.e. the [`Config`] instance is stored alongside the [`WrappedReducer`]
-///   that was constructed from it and serves as the "source-of-truth" for
-///   serialization). **In other words, this isn't a significant concern.**
-/// - My main concern focuses on readability and maintainability:
-///   - there are "a lot" of Reducer variations to support. Combinatorics from
-///     generic types (especially when we want to make different choices for
-///     structure functions and correlation functions), significantly increase
-///     the number of variations...
-///   - Let's consider what it takes to add a new reducer:
-///     - under the current system, we just need to update [`build_registry`].
-///     - under an enum-system, we would need to update
-///       - [`build_registry`] (or whatever equivalent we shift to using).
-///       - The enum-system would also have equivalent methods for each method
-///         that this trait currently declares (there are 5 at the time of
-///         writing), and there would be a match statement over all variants.
-///         We would need to update the variant in every method.
-///     - while we could potentially use macros to reduce code duplication, I
-///       worry about readability
-///       - to be fair, we do now use a macro in [`WrappedIrregularHist`].
-///         With that said, this covers very special cases (that we may want
-///         to consider removing...).
-///       - if we don't remove [`WrappedIrregularHist`], we would need to have
-///         special handling in the enum-dispatch approach for these special
-///         cases (which could significantly complicate the macros)
-/// - At a surface-level, it might seem like the enum-system would let us
-///   remove all machinery to make [`Config`] implement the [`Eq`] trait
-///   (namely, the machinery to implement bin-edge equality checks)
-///   - in practice, that isn't really true.
-///   - performing equality checks for distance edge bins and Histogram
-///     reducers requires us to implement the vast majority of this machinery
-///     anyway.
-///
-/// There are some other considerations:
-/// - do we want to support a future where external code can implement new
-///   Reducers? (At the moment, we don't)
-/// - is the performance benefit of enum-dispatch significant
-///   - I'm sketipical, at the moment
-///   - But, I could totally see it being more important if we supported
-///     multiple reducers per accumulator.
-///
-/// Importantly, I'm happy to be proven wrong and change our approach. If
-/// anybody wants to implement an enum-dispatch approach, I would happily
-/// consider it!
-pub(crate) trait WrappedReducer {
-    /// merge the state information tracked by `binned_statepack` and
-    /// `other_binned_statepack`, and update `binned_statepack` accordingly
-    ///
-    /// # Note
-    /// The `config` argument **must** be identical to the value passed
-    /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
-    /// implement the [`WrappedIrregularHist`] type
-    fn merge(
-        &self,
-        binned_statepack: &mut StatePackViewMut,
-        other_binned_statepack: &StatePackView,
-        config: &Config,
-    );
-
-    /// compute the output quantities from the accumulator's state and return
-    /// the result in a HashMap.
-    ///
-    /// # Note
-    /// The `config` argument **must** be identical to the value passed
-    /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
-    /// implement the [`WrappedIrregularHist`] type
-    fn get_output(
-        &self,
-        binned_statepack: &StatePackView,
-        config: &Config,
-    ) -> HashMap<&'static str, Vec<f64>>;
-
-    /// Reset the state within the binned statepack.
-    ///
-    /// # Note
-    /// The `config` argument **must** be identical to the value passed
-    /// into [`wrapped_reducer_from_config`]. it is _only_ used to help
-    /// implement the [`wrappedirregularhist`] type
-    fn reset_full_statepack(&self, binned_statepack: &mut StatePackViewMut, config: &Config);
-
-    /// Returns the size of individual accumulator states.
-    ///
-    /// In a binned_statepack, the total number of entries is the product of
-    /// the number returned by this method and the number of bins.
-    ///
-    /// # Notes
-    /// While the number of outputs per bin is commonly the same as the value
-    /// returned by this function, that need not be the case. For example,
-    /// imagine we used an algorithm like Kahan summation to attain improved
-    /// accuracy.
-    ///
-    /// The `config` argument **must** be identical to the value passed
-    /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
-    /// implement the [`WrappedIrregularHist`] type
-    fn accum_state_size(&self, config: &Config) -> usize;
-
-    /// Executes the reduction on the supplied spatial data and updates
-    /// binned_statepack accordingly.
-    ///
-    /// # Extra Arguments
-    /// We will definitely need to accept more arguments in the future
-    /// (e.g. to control parallelism)
-    ///
-    /// # Note
-    /// The `config` argument **must** be identical to the value passed
-    /// into [`wrapped_reducer_from_config`]. We _only_ require a full
-    /// [`Config`] instance, rather than _just_ the distance bin edges in
-    /// order to help implement the [`WrappedIrregularHist`] type
-    ///
-    /// # Why this exists?
-    /// At a high-level, one might ask why does this exist? The full reduction
-    /// has multiple inputs and it doesn't really seem like it should be a
-    /// method of the Reducer... The answer: "because it has to."
-    ///
-    /// Aside: In an enum-dispatch approach, the reduction-launcher function
-    /// wouldn't *need* to directly be a method attached to the enum, but the
-    /// function would still need to have access to all the enum's details
-    /// (in order to perform a match over every variant)
-    fn exec_reduction(
-        &self,
-        binned_statepack: &mut StatePackViewMut,
-        spatial_info: SpatialInfo,
-        config: &Config,
-    ) -> Result<(), Error>;
-}
-
 /// Takes a Calls function (`func`) on:
 ///   - the reducer expression (this can be refer to a variable holding a
 ///     reducer or be an expression that returns a reducer)
@@ -417,8 +277,15 @@ macro_rules! forward_reducer{
 
 pub(crate) struct WrappedReducerNew;
 
-impl WrappedReducer for WrappedReducerNew {
-    fn merge(
+impl WrappedReducerNew {
+    /// merge the state information tracked by `binned_statepack` and
+    /// `other_binned_statepack`, and update `binned_statepack` accordingly
+    ///
+    /// # Note
+    /// The `config` argument **must** be identical to the value passed
+    /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
+    /// implement the [`WrappedIrregularHist`] type
+    pub(crate) fn merge(
         &self,
         binned_statepack: &mut StatePackViewMut,
         other_binned_statepack: &StatePackView,
@@ -430,7 +297,14 @@ impl WrappedReducer for WrappedReducerNew {
         )
     }
 
-    fn get_output(
+    /// compute the output quantities from the accumulator's state and return
+    /// the result in a HashMap.
+    ///
+    /// # Note
+    /// The `config` argument **must** be identical to the value passed
+    /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
+    /// implement the [`WrappedIrregularHist`] type
+    pub(crate) fn get_output(
         &self,
         binned_statepack: &StatePackView,
         config: &Config,
@@ -440,13 +314,37 @@ impl WrappedReducer for WrappedReducerNew {
         )
     }
 
-    fn reset_full_statepack(&self, binned_statepack: &mut StatePackViewMut, config: &Config) {
+    /// Reset the state within the binned statepack.
+    ///
+    /// # Note
+    /// The `config` argument **must** be identical to the value passed
+    /// into [`wrapped_reducer_from_config`]. it is _only_ used to help
+    /// implement the [`wrappedirregularhist`] type
+    pub(crate) fn reset_full_statepack(
+        &self,
+        binned_statepack: &mut StatePackViewMut,
+        config: &Config,
+    ) {
         forward_reducer!(
             make_reducer(config); reset_full_statepack(reducer_ref, binned_statepack)
         )
     }
 
-    fn accum_state_size(&self, config: &Config) -> usize {
+    /// Returns the size of individual accumulator states.
+    ///
+    /// In a binned_statepack, the total number of entries is the product of
+    /// the number returned by this method and the number of bins.
+    ///
+    /// # Notes
+    /// While the number of outputs per bin is commonly the same as the value
+    /// returned by this function, that need not be the case. For example,
+    /// imagine we used an algorithm like Kahan summation to attain improved
+    /// accuracy.
+    ///
+    /// The `config` argument **must** be identical to the value passed
+    /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
+    /// implement the [`WrappedIrregularHist`] type
+    pub(crate) fn accum_state_size(&self, config: &Config) -> usize {
         // this can't be a closure and accept a generic arg
         fn f(reducer: &impl Reducer) -> usize {
             reducer.accum_state_size()
@@ -457,7 +355,29 @@ impl WrappedReducer for WrappedReducerNew {
         )
     }
 
-    fn exec_reduction(
+    /// Executes the reduction on the supplied spatial data and updates
+    /// binned_statepack accordingly.
+    ///
+    /// # Extra Arguments
+    /// We will definitely need to accept more arguments in the future
+    /// (e.g. to control parallelism)
+    ///
+    /// # Note
+    /// The `config` argument **must** be identical to the value passed
+    /// into [`wrapped_reducer_from_config`]. We _only_ require a full
+    /// [`Config`] instance, rather than _just_ the distance bin edges in
+    /// order to help implement the [`WrappedIrregularHist`] type
+    ///
+    /// # Why this exists?
+    /// At a high-level, one might ask why does this exist? The full reduction
+    /// has multiple inputs and it doesn't really seem like it should be a
+    /// method of the Reducer... The answer: "because it has to."
+    ///
+    /// Aside: In an enum-dispatch approach, the reduction-launcher function
+    /// wouldn't *need* to directly be a method attached to the enum, but the
+    /// function would still need to have access to all the enum's details
+    /// (in order to perform a match over every variant)
+    pub(crate) fn exec_reduction(
         &self,
         binned_statepack: &mut StatePackViewMut,
         spatial_info: SpatialInfo,

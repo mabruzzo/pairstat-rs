@@ -83,7 +83,7 @@
 use crate::{
     Error,
     wrapped_reducer::{
-        BinEdgeSpec, Config, SpatialInfo, ValidatedBinEdgeVec, WrappedReducer, WrappedReducerNew,
+        BinEdgeSpec, Config, SpatialInfo, ValidatedBinEdgeVec, WrappedReducerNew,
         wrapped_reducer_from_config,
     },
 };
