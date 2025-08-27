@@ -164,9 +164,12 @@ fn build_registry() -> HashMap<String, MkWrappedReducerFn> {
                         pair_op: PairOperation::ElementwiseMultiply,
                     }) as Box<dyn WrappedReducer>)
                 } else {
+                    todo!()
+                    /*
                     Ok(Box::new(WrappedIrregularHist {
                         pair_op: PairOperation::ElementwiseMultiply,
                     }) as Box<dyn WrappedReducer>)
+                    */
                 }
             }),
         ),
@@ -197,9 +200,11 @@ fn build_registry() -> HashMap<String, MkWrappedReducerFn> {
                         pair_op: PairOperation::ElementwiseSub,
                     }) as Box<dyn WrappedReducer>)
                 } else {
+                    todo!();
+                    /*
                     Ok(Box::new(WrappedIrregularHist {
                         pair_op: PairOperation::ElementwiseSub,
-                    }) as Box<dyn WrappedReducer>)
+                    }) as Box<dyn WrappedReducer>)*/
                 }
             }),
         ),
@@ -462,58 +467,44 @@ struct WrappedIrregularHist {
     pair_op: PairOperation,
 }
 
-/// Calls function with a temporary histogram reducer that has irregular
-/// bucket edges.
+/// Takes a Calls function (`func`) on:
+///   - the reducer expression (this can be refer to a variable holding a
+///     reducer or be an expression that returns a reducer)
+///   - other arguments (passed as arguments to `forward_reducer`)
 ///
-/// In more detail, this macro:
-/// - temporarily constructs a [`ScalarHistogram`] with the
-///   [`IrregularBinEdges`] type (using details from the provided
-///   [`PairOperation`] and [`Config`] arguments)
-/// - passes a reference to the temporary reducer to the specified function,
-///   as the first argument (replacing the `reducer_ref` placeholder), and
-///   return's the function's result
-/// - the temporary reducer is dropped as we leave scope.
-///
-/// In more detail, this is intended to reduce boilerplate code within
-/// [`WrappedIrregularHist`]. We could replace this with a function if we
-/// converted [`WrappedIrregularHist`] so that it is a generic type with
-/// respect to [`pairstat_nostd_internal::ScalarizeOp`]
-macro_rules! reconstruct_hist_reducer_and_forward{
-    ($pair_op:expr, $config:expr; $func:ident(reducer_ref, $($args:expr),*)) => {
+/// Examples:
+/// ```text
+/// forward_reducer!(make_reducer(config); func(reducer_ref, other_arg1, other_arg2));
+/// # trailing comma is necessary for unary functions!
+/// forward_reducer!(make_reducer(config); func(reducer_ref,));
+/// ```
+macro_rules! forward_reducer{
+    ($reducer:expr; $func:ident(reducer_ref, $($args:expr),*)) => {
         {
-            let edges = match $config.hist_reducer_bucket {
-                Some(BinEdgeSpec::Vec(ref v)) => v.as_irregular_edge_view(),
-                _ => panic!("Bug: should be unreachable!"),
-            };
-            match $pair_op {
-                PairOperation::ElementwiseMultiply => {
-                    let my_reducer = ComponentSumHistogram::from_bin_edges(edges);
-                    $func(&my_reducer, $($args),*)
-                }
-                PairOperation::ElementwiseSub => {
-                    let my_reducer = EuclideanNormHistogram::from_bin_edges(edges);
-                    $func(&my_reducer, $($args),*)
-                }
+            match $reducer {
+                ReducerKind::TPCFMean(r) => $func(&r, $($args),*),
+                ReducerKind::TPCFHistRegular(r) =>  $func(&r, $($args),*),
+                ReducerKind::TPCFHistIrregular(r) =>  $func(&r, $($args),*),
+                ReducerKind::AstroSF1Mean(r) =>  $func(&r, $($args),*),
+                ReducerKind::AstroSF1HistRegular(r) =>  $func(&r, $($args),*),
+                ReducerKind::AstroSF1HistIrregular(r) =>  $func(&r, $($args),*),
             }
         }
     }
 }
 
-impl WrappedReducer for WrappedIrregularHist {
+pub(crate) struct WrappedReducerNew;
+
+impl WrappedReducer for WrappedReducerNew {
     fn merge(
         &self,
         binned_statepack: &mut StatePackViewMut,
         other_binned_statepack: &StatePackView,
         config: &Config,
     ) {
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op,
-            config;
-            merge_full_statepacks(
-                reducer_ref,
-                binned_statepack,
-                other_binned_statepack
-            )
+        forward_reducer!(
+            make_reducer(config);
+            merge_full_statepacks(reducer_ref, binned_statepack, other_binned_statepack)
         )
     }
 
@@ -522,14 +513,14 @@ impl WrappedReducer for WrappedIrregularHist {
         binned_statepack: &StatePackView,
         config: &Config,
     ) -> HashMap<&'static str, Vec<f64>> {
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op, config; get_output(reducer_ref, binned_statepack)
+        forward_reducer!(
+            make_reducer(config); get_output(reducer_ref, binned_statepack)
         )
     }
 
     fn reset_full_statepack(&self, binned_statepack: &mut StatePackViewMut, config: &Config) {
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op, config; reset_full_statepack(reducer_ref, binned_statepack)
+        forward_reducer!(
+            make_reducer(config); reset_full_statepack(reducer_ref, binned_statepack)
         )
     }
 
@@ -539,8 +530,8 @@ impl WrappedReducer for WrappedIrregularHist {
             reducer.accum_state_size()
         }
 
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op, config; f(reducer_ref,) // the macro needs trailing `,`
+        forward_reducer!(
+            make_reducer(config); f(reducer_ref,) // the macro needs trailing `,`
         )
     }
 
@@ -550,17 +541,45 @@ impl WrappedReducer for WrappedIrregularHist {
         spatial_info: SpatialInfo,
         config: &Config,
     ) -> Result<(), Error> {
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op,
-            config;
+        let reducer = make_reducer(config);
+        let pair_op = reducer.pair_op();
+
+        forward_reducer!(
+            reducer;
             exec_reduction_helper(
                 reducer_ref,
                 binned_statepack,
                 spatial_info,
                 &config.squared_distance_bin_edges,
-                self.pair_op
+                pair_op
             )
         )
+    }
+}
+
+fn make_reducer(config: &Config) -> ReducerKind {
+    todo!("implement me!");
+}
+
+enum ReducerKind<'a> {
+    TPCFMean(ComponentSumMean),
+    TPCFHistRegular(ComponentSumHistogram<RegularBinEdges>),
+    TPCFHistIrregular(ComponentSumHistogram<IrregularBinEdges<'a>>),
+    AstroSF1Mean(EuclideanNormMean),
+    AstroSF1HistRegular(ComponentSumHistogram<RegularBinEdges>),
+    AstroSF1HistIrregular(ComponentSumHistogram<IrregularBinEdges<'a>>),
+}
+
+impl<'a> ReducerKind<'a> {
+    fn pair_op(&self) -> PairOperation {
+        match self {
+            Self::TPCFMean(_) => PairOperation::ElementwiseMultiply,
+            Self::TPCFHistRegular(_) => PairOperation::ElementwiseMultiply,
+            Self::TPCFHistIrregular(_) => PairOperation::ElementwiseMultiply,
+            Self::AstroSF1Mean(_) => PairOperation::ElementwiseSub,
+            Self::AstroSF1HistRegular(_) => PairOperation::ElementwiseSub,
+            Self::AstroSF1HistIrregular(_) => PairOperation::ElementwiseSub,
+        }
     }
 }
 
