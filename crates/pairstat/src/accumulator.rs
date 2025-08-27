@@ -83,7 +83,7 @@
 use crate::{
     Error,
     wrapped_reducer::{
-        BinEdgeSpec, Config, SpatialInfo, ValidatedBinEdgeVec, WrappedReducer,
+        BinEdgeSpec, Config, SpatialInfo, ValidatedBinEdgeVec, WrappedReducer, WrappedReducerNew,
         wrapped_reducer_from_config,
     },
 };
@@ -234,7 +234,7 @@ impl AccumulatorData {
 /// Encapsulates the accumulator properties
 struct AccumulatorDescr {
     config: Config,
-    reducer: Box<dyn WrappedReducer>,
+    reducer: WrappedReducerNew,
 }
 
 impl Clone for AccumulatorDescr {
