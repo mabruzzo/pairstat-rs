@@ -67,7 +67,6 @@ impl<'a, R: Reducer, B: BinEdges> ReductionSpec for TwoPointCartesian<'a, R, B> 
         self.squared_distance_bin_edges.n_bins()
     }
 
-    // todo: I think we can entirely eliminate inner_team_loop_bounds and outer_team_loop_bounds
     fn team_loop_bounds(&self, team_id: usize, _team_info: &StandardTeamParam) -> (usize, usize) {
         (team_id, team_id + 1)
     }
