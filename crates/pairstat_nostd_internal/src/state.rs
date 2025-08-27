@@ -213,7 +213,7 @@ impl<'a> StatePackView<'a> {
     }
 
     pub fn as_slice(&self) -> &[f64] {
-        &self.data
+        self.data
     }
 
     #[inline]
@@ -306,11 +306,11 @@ impl<'a> StatePackViewMut<'a> {
     }
 
     pub fn as_slice_mut(&mut self) -> &mut [f64] {
-        &mut self.data
+        self.data
     }
 
     pub fn as_slice(&self) -> &[f64] {
-        &self.data
+        self.data
     }
 
     pub fn as_view<'b>(&'b self) -> StatePackView<'b> {
