@@ -1,4 +1,4 @@
-use ndarray::{NewAxis, s};
+use ndarray::ArrayView2;
 use pairstat::{Comp0Histogram, Comp0Mean, Reducer, get_output_from_statepack_array};
 use pairstat_nostd_internal::{AccumStateView, AccumStateViewMut, Datum};
 use std::collections::HashMap;
@@ -9,9 +9,13 @@ use std::collections::HashMap;
 // API
 fn _get_output_single(
     reducer: &impl Reducer,
-    stateprop: &AccumStateView,
+    accum_state: &AccumStateView,
 ) -> HashMap<&'static str, Vec<f64>> {
-    get_output_from_statepack_array(reducer, &stateprop.as_array_view().slice(s![.., NewAxis]))
+    let len = accum_state.len();
+    assert!(len > 0, "accum_state should never be empty");
+    let buf = Vec::<f64>::from_iter((0..len).map(|i| accum_state[i]));
+    let view = ArrayView2::from_shape([len, 1], &buf).unwrap();
+    get_output_from_statepack_array(reducer, &view)
 }
 
 // TODO: factor out this function and the get_output function from

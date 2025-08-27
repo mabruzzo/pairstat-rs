@@ -1,16 +1,12 @@
-use pairstat::{Comp0Mean, Reducer, SerialExecutor, StatePackViewMut, get_output};
+use pairstat::{Comp0Mean, SerialExecutor, StatePackViewMut, get_output};
 
 use pairstat_nostd_internal::{
-    BinnedDatum,
     reduce_sample::{
         chunked::{
             MeanChunkedReduction, QuadraticPolynomial, SampleDataStreamView, naive_mean_chunked,
-            reducer_mean_chunked, restructured1_mean_chunked, restructured2_mean_chunked,
+            reducer_mean_chunked,
         },
-        unordered::{
-            MeanUnorderedReduction, naive_mean_unordered, reducer_mean_unordered,
-            restructured1_mean_unordered, restructured2_mean_unordered,
-        },
+        unordered::{MeanUnorderedReduction, naive_mean_unordered, reducer_mean_unordered},
     },
     reset_full_statepack,
 };
@@ -163,115 +159,6 @@ fn build_registry(f: QuadraticPolynomial) -> HashMap<String, BoxedFunc> {
                     StreamKind::Unordered => reducer_mean_unordered(stream, f, &reducer, statepack),
                 }
                 let out = get_output(&reducer, &statepack.as_view());
-                Ok(out)
-            },
-        ),
-    );
-
-    out.insert(
-        String::from("restructured1"),
-        Box::new(
-            move |stream: &SampleDataStreamView,
-                  version,
-                  binned_statepack: &mut StatePackViewMut| {
-                // roughly approximates the case with
-                let n_members_per_team = 4;
-
-                let reducer = Comp0Mean::new();
-                reset_full_statepack(&reducer, binned_statepack);
-                match version {
-                    StreamKind::Chunked => {
-                        let mut tmp_buf =
-                            vec![0.0; n_members_per_team * binned_statepack.total_size()];
-                        let mut tmp_accum_states = StatePackViewMut::from_slice(
-                            n_members_per_team,
-                            reducer.accum_state_size(),
-                            &mut tmp_buf,
-                        );
-                        restructured1_mean_chunked(
-                            stream,
-                            f,
-                            &reducer,
-                            binned_statepack,
-                            &mut tmp_accum_states,
-                            None,
-                        );
-                    }
-                    StreamKind::Unordered => {
-                        let mut collect_pad = vec![BinnedDatum::zeroed(); n_members_per_team];
-                        restructured1_mean_unordered(
-                            stream,
-                            f,
-                            &reducer,
-                            binned_statepack,
-                            &mut collect_pad,
-                            None,
-                        );
-                    }
-                }
-                let out = get_output(&reducer, &binned_statepack.as_view());
-                Ok(out)
-            },
-        ),
-    );
-
-    out.insert(
-        String::from("restructured2"),
-        Box::new(
-            move |stream: &SampleDataStreamView,
-                  version,
-                  binned_statepack: &mut StatePackViewMut| {
-                let reducer = Comp0Mean::new();
-                reset_full_statepack(&reducer, binned_statepack);
-                // we are going to break up the work in a way that is
-                // equivalent to having 3 thread teams with 8 members per team
-                let n_teams = 3;
-                let n_members_per_team = 8;
-
-                // allocate the scratch statepacks:
-                let n_bins = binned_statepack.n_states();
-                let accum_size = binned_statepack.state_size();
-                let mut scratch_binned_statepacks_buf =
-                    vec![0.0; binned_statepack.total_size() * n_teams];
-                let mut scratch_binned_statepacks: Vec<StatePackViewMut> =
-                    scratch_binned_statepacks_buf
-                        .chunks_exact_mut(binned_statepack.total_size())
-                        .map(|chunk: &mut [f64]| {
-                            StatePackViewMut::from_slice(n_bins, accum_size, chunk)
-                        })
-                        .collect();
-
-                match version {
-                    StreamKind::Chunked => {
-                        let mut tmp_buf =
-                            vec![0.0; n_members_per_team * binned_statepack.total_size()];
-                        let mut tmp_accum_states = StatePackViewMut::from_slice(
-                            n_members_per_team,
-                            reducer.accum_state_size(),
-                            &mut tmp_buf,
-                        );
-                        restructured2_mean_chunked(
-                            stream,
-                            f,
-                            &reducer,
-                            binned_statepack,
-                            &mut scratch_binned_statepacks,
-                            &mut tmp_accum_states,
-                        );
-                    }
-                    StreamKind::Unordered => {
-                        let mut collect_pad = vec![BinnedDatum::zeroed(); n_members_per_team];
-                        restructured2_mean_unordered(
-                            stream,
-                            f,
-                            &reducer,
-                            binned_statepack,
-                            &mut scratch_binned_statepacks,
-                            &mut collect_pad,
-                        );
-                    }
-                }
-                let out = get_output(&reducer, &binned_statepack.as_view());
                 Ok(out)
             },
         ),

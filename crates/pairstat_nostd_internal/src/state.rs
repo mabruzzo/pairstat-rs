@@ -1,9 +1,5 @@
 //! Introduces the [`AccumStateView`] and [`AccumStateViewMut`] types
 //!
-//! Currently these simply wrap `ndarray::ArrayView1<f64>` and
-//! `ndarray::ArrayViewMut1<f64>` types, respectively. We hope to move away
-//! from this in the future.
-//!
 //! # Why do we need separate types to represent immutable & mutable views?
 //!
 //! To be more clear: `ndarray::ArrayView1<f64>` and
@@ -59,52 +55,46 @@
 //!       `StatePackList`: you wouldn having mutable & immutable slices that
 //!       include overlapping memory regions (this isn't allowed in safe or
 //!       unsafe Rust)
+use crate::misc::View2DUnsignedSpec;
+use core::{
+    num::NonZeroUsize,
+    ops::{Index, IndexMut},
+};
 
-use core::ops::{Index, IndexMut};
-use ndarray::{ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis};
-
+/// A read-only view of a single accumulation state
+///
+/// This represents a view onto a full array external array or a subregion of
+/// a larger array. The lifetime parameter that parameterizes the type,
+/// describes the scope of the borrow.
+///
+/// This is commonly constructed from either [`StatePackViewMut`],
+/// [`StatePackView`], or [`AccumStateViewMut`].
+///
+/// See also [`AccumStateViewMut`].
 pub struct AccumStateView<'a> {
-    // when we refactor this to stop wrapping ArrayView1, we really *need* to
-    // wrap a pointer rather than a slice.
-    // - this will introduce unsafe blocks of logic, but it's essential for
-    //   avoiding a scenario with undefined behavior
-    // - the concern is that we could end up in a scenario where we have a
-    //   pair of `AccumStateView` and `AccumStateViewMut` instances both
-    //   provide views to different regions of `StatePackViewMut`
-    // - if we use slices then we will have a mutable slice and an immutable
-    //   slice that reference an overlapping region of memory at the same time.
-    //   That isn't allowed! It will trigger undefined behavior
-    //
-    // We probably need to use `core::marker::PhantomData` to probably track
-    // lifetimes (see https://doc.rust-lang.org/nomicon/phantom-data.html)
-    data: ArrayView1<'a, f64>,
+    // see the comment within the declaration of AccumStateViewMut for some
+    // important implementation notes pertaining to implementation (and are
+    // very relevant for any kind of refactoring)
+    len: NonZeroUsize,
+    stride: usize,
+    data: &'a [f64],
 }
 
 impl<'a> AccumStateView<'a> {
-    // todo: remove this method before a release!
-    pub fn from_array_view(array_view: ArrayView1<'a, f64>) -> Self {
-        Self { data: array_view }
-    }
-
-    pub fn from_contiguous_slice(state: &'a [f64]) -> Self {
-        Self {
-            data: ArrayView1::from_shape([state.len()], state).unwrap(),
-        }
-    }
-
-    // todo: remove this method before a release!
-    pub fn as_array_view(&self) -> ArrayView1<f64> {
-        self.data.view()
+    /// Private constructor used by other types in this module
+    fn internal_new(len: NonZeroUsize, stride: usize, data: &'a [f64]) -> Self {
+        debug_assert!(((len.get() - 1) * stride) < data.len());
+        Self { len, stride, data }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.len.get()
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        false
     }
 }
 
@@ -113,42 +103,54 @@ impl<'a> Index<usize> for AccumStateView<'a> {
 
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
-        self.data.index(index)
+        self.data.index(index * self.stride)
     }
 }
 
+/// A read-write view of a single accumulation state
+///
+/// This represents a view onto a full array external array or a subregion of
+/// a larger array. The lifetime parameter that parameterizes the type,
+/// describes the scope of the borrow.
+///
+/// This is commonly constructed from [`StatePackViewMut`].
+///
+/// See also [`AccumStateView`].
 pub struct AccumStateViewMut<'a> {
-    // when we refactor this to stop wrapping ArrayViewMut1, we really *need*
-    // to wrap a pointer rather than a slice.
-    // - this will introduce unsafe blocks of logic, but it's essential for
-    //   avoiding a scenario with undefined behavior
-    // - the concern is that we could end up in a scenario where we have a
-    //   pair of `AccumStateView` and `AccumStateViewMut` instances both
-    //   provide views to different regions of `StatePackViewMut`
-    // - if we use slices then we will have a mutable slice and an immutable
-    //   slice that reference an overlapping region of memory at the same time.
-    //   That isn't allowed! It will trigger undefined behavior
+    // Someday, we may choose to implement this in terms of a pointer if we
+    // wanted to be able to make multiple disjoint views onto a
+    // StatePackViewMut, where at least 1 view is mutable (the docstring of
+    // StatePackViewMut provides some additional detail).
     //
-    // We probably need to use `core::marker::PhantomData` to probably track
-    // lifetimes (see https://doc.rust-lang.org/nomicon/phantom-data.html)
-    data: ArrayViewMut1<'a, f64>,
+    // If we go that route, we probably need to employ
+    // `core::marker::PhantomData` to properly track lifetimes
+    // (see https://doc.rust-lang.org/nomicon/phantom-data.html)
+    len: NonZeroUsize,
+    stride: usize,
+    data: &'a mut [f64],
 }
 
 impl<'a> AccumStateViewMut<'a> {
-    // todo: remove this method before a release!
-    pub fn from_array_view(array_view: ArrayViewMut1<'a, f64>) -> Self {
-        Self { data: array_view }
+    /// Private constructor used by other types in this module
+    fn internal_new(len: NonZeroUsize, stride: usize, data: &'a mut [f64]) -> Self {
+        debug_assert!(((len.get() - 1) * stride) < data.len());
+        Self { len, stride, data }
     }
 
-    pub fn from_contiguous_slice(state: &'a mut [f64]) -> Self {
-        Self {
-            data: ArrayViewMut1::from_shape([state.len()], state).unwrap(),
-        }
+    // consider returning an option rather than panicking
+    pub fn from_contiguous_slice(data: &'a mut [f64]) -> Self {
+        let Some(len) = NonZeroUsize::new(data.len()) else {
+            panic!("can't construct an empty AccumStateViewMut");
+        };
+        let stride = 1;
+        Self { len, stride, data }
     }
 
     pub fn as_view<'b>(&'b self) -> AccumStateView<'b> {
         AccumStateView {
-            data: self.data.view(),
+            len: self.len,
+            stride: self.stride,
+            data: self.data,
         }
     }
 
@@ -160,12 +162,12 @@ impl<'a> AccumStateViewMut<'a> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.len.get()
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        false
     }
 }
 
@@ -174,121 +176,175 @@ impl<'a> Index<usize> for AccumStateViewMut<'a> {
 
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
-        self.data.index(index)
+        self.data.index(index * self.stride)
     }
 }
 
 impl<'a> IndexMut<usize> for AccumStateViewMut<'a> {
     #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        self.data.index_mut(index)
+        self.data.index_mut(index * self.stride)
     }
 }
 
-/// Represents a read-only Collection of accumulator states
+/// Represents a read-only collection of accumulation states
+///
+/// You should think of this as a read-only variant of [`StatePackViewMut`].
+/// The internal representation of both types are as similar as possible.
 ///
 /// # Note
 /// Ideally, we would be able to totally dispose of this type... But for now
 /// it serves a purpose...
 pub struct StatePackView<'a> {
     // see StatePackViewMut<'a> for refactoring notes
-    data: ArrayView2<'a, f64>,
+    data: &'a [f64],
+    idx_spec: View2DUnsignedSpec,
 }
 
 impl<'a> StatePackView<'a> {
-    pub fn from_slice(n_state: usize, state_size: usize, xs: &'a [f64]) -> Self {
-        Self {
-            data: ArrayView2::from_shape([state_size, n_state], xs).unwrap(),
+    pub fn from_slice(n_state: usize, state_size: usize, data: &'a [f64]) -> Self {
+        assert!(n_state > 0);
+        assert!(state_size > 0);
+        let idx_spec = View2DUnsignedSpec::from_shape_contiguous([state_size, n_state]).unwrap();
+        if idx_spec.required_length() > data.len() {
+            panic!("data doesn't hold the appropriate number of elements");
         }
+        Self { data, idx_spec }
     }
 
-    // todo: remove this method before our release
-    pub fn as_array_view(&self) -> ArrayView2<f64> {
-        self.data.view()
+    pub fn as_slice(&self) -> &[f64] {
+        self.data
     }
 
     #[inline]
-    pub fn get_state(&self, i: usize) -> AccumStateView {
-        AccumStateView::from_array_view(self.data.index_axis(Axis(1), i))
+    pub fn get_state(&self, i: usize) -> AccumStateView<'_> {
+        let start = self.idx_spec.map_idx2d_to_1d(0, i);
+        let len = unsafe { NonZeroUsize::new_unchecked(self.state_size()) };
+        AccumStateView::internal_new(len, self.idx_spec.strides()[0], &self.data[start..])
     }
 
+    #[inline]
     pub fn state_size(&self) -> usize {
-        self.data.len_of(Axis(0))
+        self.idx_spec.shape()[0]
     }
 
+    #[inline]
     pub fn n_states(&self) -> usize {
-        self.data.len_of(Axis(1))
+        self.idx_spec.shape()[1]
     }
 }
 
-/// Represents a collection of accumulator States
+/// Represents a read-write collection of accumulation States
 ///
-/// # Note
-/// There is some benefit to defining this even though it wraps ArrayViewMut2
-/// since it helps contain all references to the ndarray package to a single
-/// file.
+/// This type is often used to store a binned statepack.
+///
+/// # Data Representation
+/// This type stores accumulator states in an interleaved manner. In other
+/// words, the data associated with an [`StatePackView`] instance
+/// returned by [`Self::get_state`] cannot be contiguous unless the
+/// [`Self::n_states`] method returns `1`.[^single_elem]
+///
+/// ## Benefits
+/// This choice has some theoretical benefits:
+/// - when updating a binned statepack with values from another binned
+///   statepack, this representation would facilitate SIMD optimizations
+///   on a CPU. (It could also facilitate memory-colasence if the operation
+///   were parallelized on GPUs)
+/// - If you implemented [`crate::Team::calccontribs_combine_apply`] for a
+///   team where each member corresponds to a vector lane, you would
+///   theoretically want to hold the temporary accum_states in an interleaved
+///   manner (as is done by this type)
+///
+/// ## Complex disjoint mutable views
+/// Unfortunately, this choice introduces challenges if we want to be able to
+/// create 2 or more [`AccumStateViewMut`] instances that represents views on
+/// separate accumulation states held by a single [`StatePackViewMut`]
+/// instance. The same challenges are relevant for creating a
+/// [`AccumStateViewMut`] **and** 1 or more [`AccumStateView`] instances
+/// (note: there isn't any problems creating multiple [`AccumStateView`]s).
+///
+/// The **only** way to support the creation of disjoint mutable views is by
+/// implementing [`AccumStateView`] and [`AccumStateViewMut`] in terms of raw
+/// pointers, and to have the function that creates disjoint regions ensure
+/// that there is no overlap.
+///
+/// At the time of writing, [`AccumStateView`] and [`AccumStateViewMut`], are
+/// implemented in terms of slices. That implementation choice coupled with
+/// the choice of to interleave the memory of accumulation state makes it
+/// **IMPOSSIBLE** to construct 2 or more accumulation views at the same time,
+/// when at least one of the views is mutable.
+/// - The fundamental problem is that any pair of views would be represented
+///   by a pair of slices that must reference overlapping memory. It is
+///   impossible to construct a pair of slices that does this (when at least
+///   one slice is mutable)
+/// - this sentiment is reinforced by a safety note in the docstring of the
+///   [`core::slice::from_raw_parts_mut`](https://doc.rust-lang.org/core/slice/fn.from_raw_parts_mut.html)
+///
+/// [^single_elem]: Technically, a [`StatePackView`] instance returned by
+///     [`Self::get_state`] could be considered contiguous if
+///     [`Self::state_size`] returns `1`. But that's only because a 1-element
+///     array is always contiguous.
 pub struct StatePackViewMut<'a> {
-    // when we refactor this to stop wrapping ArrayViewMut2, I *think*, we
-    // probably want to wrap a pointer rather than a slice.
-    //
-    // If we use a pointer, we should consider whether we need to make use of
+    // If we ever reimplement this in terms of a pointer (I don't think that
+    // there's a benefit), we should consider whether we need to make use of
     // core::marker::PhantomData. I don't *think* it would necessary for this
     // scenario, but we should review
     // https://doc.rust-lang.org/nomicon/phantom-data.html
-    data: ArrayViewMut2<'a, f64>,
+    data: &'a mut [f64],
+    idx_spec: View2DUnsignedSpec,
 }
 
 impl<'a> StatePackViewMut<'a> {
-    // todo: remove this method before our release
-    pub fn from_array_view(array_view: ArrayViewMut2<'a, f64>) -> Self {
-        Self { data: array_view }
-    }
-
-    pub fn from_slice(n_state: usize, state_size: usize, xs: &'a mut [f64]) -> Self {
-        Self {
-            data: ArrayViewMut2::from_shape([state_size, n_state], xs).unwrap(),
+    pub fn from_slice(n_state: usize, state_size: usize, data: &'a mut [f64]) -> Self {
+        assert!(n_state > 0);
+        assert!(state_size > 0);
+        let idx_spec = View2DUnsignedSpec::from_shape_contiguous([state_size, n_state]).unwrap();
+        if idx_spec.required_length() > data.len() {
+            panic!("data doesn't hold the appropriate number of elements");
         }
+        Self { data, idx_spec }
     }
 
-    // todo: remove this method before our release
-    pub fn as_array_view(&self) -> ArrayView2<f64> {
-        self.data.view()
+    pub fn as_slice_mut(&mut self) -> &mut [f64] {
+        self.data
     }
 
-    // todo: remove this method before our release
-    pub fn as_array_view_mut(&mut self) -> ArrayViewMut2<f64> {
-        self.data.view_mut()
+    pub fn as_slice(&self) -> &[f64] {
+        self.data
     }
 
     pub fn as_view<'b>(&'b self) -> StatePackView<'b> {
         StatePackView {
-            data: self.data.view(),
+            data: self.data,
+            idx_spec: self.idx_spec.clone(),
         }
     }
 
     #[inline]
-    pub fn get_state(&self, i: usize) -> AccumStateView {
-        AccumStateView::from_array_view(self.data.index_axis(Axis(1), i))
+    pub fn get_state(&self, i: usize) -> AccumStateView<'_> {
+        let start = self.idx_spec.map_idx2d_to_1d(0, i);
+        let len = unsafe { NonZeroUsize::new_unchecked(self.state_size()) };
+        AccumStateView::internal_new(len, self.idx_spec.strides()[0], &self.data[start..])
     }
 
     #[inline]
-    pub fn get_state_mut(&mut self, i: usize) -> AccumStateViewMut {
-        AccumStateViewMut::from_array_view(self.data.index_axis_mut(Axis(1), i))
+    pub fn get_state_mut(&mut self, i: usize) -> AccumStateViewMut<'_> {
+        let start = self.idx_spec.map_idx2d_to_1d(0, i);
+        let len = unsafe { NonZeroUsize::new_unchecked(self.state_size()) };
+        AccumStateViewMut::internal_new(len, self.idx_spec.strides()[0], &mut self.data[start..])
     }
 
+    #[inline]
     pub fn state_size(&self) -> usize {
-        self.data.len_of(Axis(0))
+        self.idx_spec.shape()[0]
     }
 
+    #[inline]
     pub fn n_states(&self) -> usize {
-        self.data.len_of(Axis(1))
+        self.idx_spec.shape()[1]
     }
 
     pub fn total_size(&self) -> usize {
         self.state_size() * self.n_states()
     }
-
-    // we probably want to add something like get_pair_disjoint_mut, which would
-    // would be inspired by the slice type's more general get_disjoint_mut
-    // method
 }

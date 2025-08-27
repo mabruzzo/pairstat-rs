@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use ndarray::{ArrayView1, ArrayView2, ArrayViewMut2, Axis};
 
 use pairstat_nostd_internal::{
-    AccumStateView, Datum, OutputDescr, Reducer, ScalarHistogram, ScalarMean, ScalarizeOp,
-    StatePackView,
+    Datum, OutputDescr, Reducer, ScalarHistogram, ScalarMean, ScalarizeOp, StatePackView,
 };
 
 /// to be used when computing the "astronomer's first order structure function"
@@ -39,7 +38,12 @@ pub fn get_output(
     reducer: &impl Reducer,
     statepack: &StatePackView,
 ) -> HashMap<&'static str, Vec<f64>> {
-    get_output_from_statepack_array(reducer, &statepack.as_array_view())
+    let tmp = ArrayView2::from_shape(
+        [statepack.state_size(), statepack.n_states()],
+        statepack.as_slice(),
+    )
+    .unwrap();
+    get_output_from_statepack_array(reducer, &tmp)
 }
 
 // todo: figure out how to remove me before the first release
@@ -67,13 +71,15 @@ pub fn get_output_from_statepack_array(
     let n_bins = statepack_data.shape()[1];
     let n_comps = description.n_per_accum_state();
 
+    let statepack = StatePackView::from_slice(n_bins, n_comps, statepack_data.as_slice().unwrap());
+
     // todo: the rest of this function could definitely be optimized!
     let mut buffer = vec![0.0; n_comps * n_bins];
     let mut buffer_view = ArrayViewMut2::from_shape([n_comps, n_bins], &mut buffer).unwrap();
     for i in 0..n_bins {
         reducer.value_from_accum_state(
             &mut buffer_view.index_axis_mut(Axis(1), i),
-            &AccumStateView::from_array_view(statepack_data.index_axis(Axis(1), i)),
+            &statepack.get_state(i),
         );
     }
 

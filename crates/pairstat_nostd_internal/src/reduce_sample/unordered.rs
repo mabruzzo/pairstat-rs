@@ -4,9 +4,6 @@
 use crate::misc::segment_idx_bounds;
 use crate::parallel::{BinnedDatum, ReductionSpec, StandardTeamParam, Team};
 use crate::reduce_sample::chunked::{QuadraticPolynomial, SampleDataStreamView};
-use crate::reduce_utils::{
-    merge_full_statepacks, reset_full_statepack, serial_consolidate_scratch_statepacks,
-};
 use crate::reducer::{Comp0Mean, Datum, Reducer};
 use crate::state::StatePackViewMut;
 
@@ -50,6 +47,10 @@ pub fn reducer_mean_unordered(
     }
 }
 
+// TODO Delete everything in the giant multi-line comment
+//      (we need to ensure the file still makes sense after the fact or
+//      finish PR #59)
+/*
 // At this point, we will introduce a new version of the function that
 // rearranges the work in a manner that would be suitable for parallelization.
 //
@@ -203,6 +204,7 @@ pub fn restructured2_mean_unordered(
         &scratch_binned_statepacks.first().unwrap().as_view(),
     );
 }
+*/
 
 pub struct MeanUnorderedReduction<'a> {
     stream: SampleDataStreamView<'a>,

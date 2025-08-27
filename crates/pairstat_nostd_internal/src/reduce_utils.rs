@@ -4,8 +4,7 @@
 // useful utilities
 
 use crate::reducer::Reducer;
-use crate::state::{AccumStateViewMut, StatePackView, StatePackViewMut};
-use ndarray::s;
+use crate::state::{StatePackView, StatePackViewMut};
 
 // not sure if this should actually be part of the public API, but it's useful
 // in a handful of cases
@@ -59,7 +58,10 @@ pub fn serial_consolidate_scratch_statepacks(
 //
 // not sure if this should actually be part of the public API, but it's useful
 // in a handful of cases
-pub fn serial_merge_accum_states(reducer: &impl Reducer, statepack: &mut StatePackViewMut) {
+#[allow(dead_code)]
+pub fn serial_merge_accum_states(_reducer: &impl Reducer, _statepack: &mut StatePackViewMut) {
+    todo!("this needs to be implemented eventually. We probably need to rethink things");
+    /*
     let n_states = statepack.n_states();
 
     // we currently need to access the underlying array view in order to safely
@@ -85,4 +87,5 @@ pub fn serial_merge_accum_states(reducer: &impl Reducer, statepack: &mut StatePa
         }
         remaining_pairs /= 2;
     }
+    */
 }
