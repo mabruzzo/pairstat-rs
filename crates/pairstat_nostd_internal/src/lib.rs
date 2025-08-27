@@ -241,6 +241,7 @@ these categories _"Nested"_ and _"Batched"_.
 
 mod bins;
 mod misc;
+mod onepoint;
 mod parallel;
 mod reduce_utils;
 mod reducer;
@@ -253,6 +254,7 @@ pub mod reduce_sample;
 
 pub use bins::*;
 pub use misc::View3DSpec;
+pub use onepoint::OnePointBinned;
 pub use parallel::{
     BinnedDatum, Executor, ReductionSpec, StandardTeamParam, Team,
     fill_single_team_binned_statepack,
