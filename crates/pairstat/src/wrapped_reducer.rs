@@ -7,13 +7,13 @@
 use crate::{
     Error,
     apply::{apply_accum, apply_cartesian},
-    reducers::{EuclideanNormHistogram, EuclideanNormMean, get_output},
+    reducers::{EuclideanNormHistogram, EuclideanNormMean},
 };
 
 use pairstat_nostd_internal::{
     BinEdges, CartesianBlock, CellWidth, ComponentSumHistogram, ComponentSumMean,
     IrregularBinEdges, PairOperation, Reducer, RegularBinEdges, StatePackView, StatePackViewMut,
-    UnstructuredPoints, merge_full_statepacks, reset_full_statepack, validate_bin_edges,
+    UnstructuredPoints, merge_full_statepacks, validate_bin_edges,
 };
 use std::{collections::HashMap, sync::LazyLock};
 
@@ -142,44 +142,41 @@ pub(crate) enum SpatialInfo<'a> {
 /// # Note
 /// Make this a type-alias doesn't appear to have the desired effect. I suspect
 /// that it doesn't properly coerce a closure to function pointer
-struct MkWrappedReducerFn(fn(&Config) -> Result<Box<dyn WrappedReducer>, Error>);
+struct ReducerKindFnHolder(fn(&Config) -> Result<ReducerKind<'_>, Error>);
 
-/// returns a hashmap, where keys map the names of two-point calculations to
-/// functions that construct the appropriate boxed [`WrappedReducer`] trait
-/// objects.
-fn build_registry() -> HashMap<String, MkWrappedReducerFn> {
-    let out: HashMap<String, MkWrappedReducerFn> = HashMap::from([
+/// returns a hashmap from the names of two-point calculations to
+/// functions that construct the appropriate boxed [`ReducerKind`] instance
+fn build_registry() -> HashMap<String, ReducerKindFnHolder> {
+    let out: HashMap<String, ReducerKindFnHolder> = HashMap::from([
+        // TODO hist_cf and 2pcf can be combined, with the behavior depending on
+        // whether or not config.hist_reducer_bucket is Some.
+        // Likewise for hist_astro and astro_sf1
+
         // -------------------------------------------------
         // define mappings for correlation function reducers
         // -------------------------------------------------
         (
             "hist_cf".to_owned(),
-            MkWrappedReducerFn(|c: &Config| -> Result<Box<dyn WrappedReducer>, Error> {
-                let Some(ref edges) = c.hist_reducer_bucket else {
-                    return Err(Error::bucket_edge_presence(&c.reducer_name, true));
-                };
-                if let BinEdgeSpec::Regular(edges) = edges {
-                    Ok(Box::new(WrappedReducerImpl {
-                        reducer: ComponentSumHistogram::from_bin_edges(edges.clone()),
-                        pair_op: PairOperation::ElementwiseMultiply,
-                    }) as Box<dyn WrappedReducer>)
-                } else {
-                    Ok(Box::new(WrappedIrregularHist {
-                        pair_op: PairOperation::ElementwiseMultiply,
-                    }) as Box<dyn WrappedReducer>)
+            ReducerKindFnHolder(|c: &Config| -> Result<ReducerKind<'_>, Error> {
+                match c.hist_reducer_bucket {
+                    None => Err(Error::bucket_edge_presence(&c.reducer_name, true)),
+                    Some(BinEdgeSpec::Regular(ref edges)) => Ok(ReducerKind::TPCFHistRegular(
+                        ComponentSumHistogram::from_bin_edges(edges.clone()),
+                    )),
+                    Some(BinEdgeSpec::Vec(ref v)) => Ok(ReducerKind::TPCFHistIrregular(
+                        ComponentSumHistogram::from_bin_edges(v.as_irregular_edge_view()),
+                    )),
                 }
             }),
         ),
         (
             "2pcf".to_owned(),
-            MkWrappedReducerFn(|c: &Config| -> Result<Box<dyn WrappedReducer>, Error> {
-                if c.hist_reducer_bucket.is_some() {
-                    return Err(Error::bucket_edge_presence(&c.reducer_name, false));
+            ReducerKindFnHolder(|c: &Config| -> Result<ReducerKind<'_>, Error> {
+                // there should be no bucket edges since this is not a histogram reducer
+                match c.hist_reducer_bucket {
+                    Some(_) => Err(Error::bucket_edge_presence(&c.reducer_name, false)),
+                    None => Ok(ReducerKind::TPCFMean(ComponentSumMean::new())),
                 }
-                Ok(Box::new(WrappedReducerImpl {
-                    reducer: ComponentSumMean::new(),
-                    pair_op: PairOperation::ElementwiseMultiply,
-                }) as Box<dyn WrappedReducer>)
             }),
         ),
         // -----------------------------------------------
@@ -187,32 +184,26 @@ fn build_registry() -> HashMap<String, MkWrappedReducerFn> {
         // -----------------------------------------------
         (
             "hist_astro_sf1".to_owned(),
-            MkWrappedReducerFn(|c: &Config| -> Result<Box<dyn WrappedReducer>, Error> {
-                let Some(ref edges) = c.hist_reducer_bucket else {
-                    return Err(Error::bucket_edge_presence(&c.reducer_name, true));
-                };
-                if let BinEdgeSpec::Regular(edges) = edges {
-                    Ok(Box::new(WrappedReducerImpl {
-                        reducer: EuclideanNormHistogram::from_bin_edges(edges.clone()),
-                        pair_op: PairOperation::ElementwiseSub,
-                    }) as Box<dyn WrappedReducer>)
-                } else {
-                    Ok(Box::new(WrappedIrregularHist {
-                        pair_op: PairOperation::ElementwiseSub,
-                    }) as Box<dyn WrappedReducer>)
+            ReducerKindFnHolder(|c: &Config| -> Result<ReducerKind<'_>, Error> {
+                match c.hist_reducer_bucket {
+                    None => Err(Error::bucket_edge_presence(&c.reducer_name, true)),
+                    Some(BinEdgeSpec::Regular(ref edges)) => Ok(ReducerKind::AstroSF1HistRegular(
+                        EuclideanNormHistogram::from_bin_edges(edges.clone()),
+                    )),
+                    Some(BinEdgeSpec::Vec(ref v)) => Ok(ReducerKind::AstroSF1HistIrregular(
+                        EuclideanNormHistogram::from_bin_edges(v.as_irregular_edge_view()),
+                    )),
                 }
             }),
         ),
         (
             "astro_sf1".to_owned(),
-            MkWrappedReducerFn(|c: &Config| -> Result<Box<dyn WrappedReducer>, Error> {
-                if c.hist_reducer_bucket.is_some() {
-                    return Err(Error::bucket_edge_presence(&c.reducer_name, false));
+            ReducerKindFnHolder(|c: &Config| -> Result<ReducerKind, Error> {
+                // there should be no bucket edges since this is not a histogram reducer
+                match c.hist_reducer_bucket {
+                    Some(_) => Err(Error::bucket_edge_presence(&c.reducer_name, false)),
+                    None => Ok(ReducerKind::AstroSF1Mean(EuclideanNormMean::new())),
                 }
-                Ok(Box::new(WrappedReducerImpl {
-                    reducer: EuclideanNormMean::new(),
-                    pair_op: PairOperation::ElementwiseSub,
-                }) as Box<dyn WrappedReducer>)
             }),
         ),
     ]);
@@ -229,14 +220,16 @@ fn build_registry() -> HashMap<String, MkWrappedReducerFn> {
 ///
 /// # Note
 /// This may not be the optimal way to encode this information.
-static REDUCER_MAKER_REGISTRY: LazyLock<HashMap<String, MkWrappedReducerFn>> =
+static REDUCER_MAKER_REGISTRY: LazyLock<HashMap<String, ReducerKindFnHolder>> =
     LazyLock::new(build_registry);
+
+fn make_reducer(config: &Config) -> ReducerKind {
+    reducer_kind_from_config(config).unwrap() // this is inefficient...
+}
 
 /// constructs the appropriate [`WrappedReducer`] trait object that
 /// corresponds to the specified configuration
-pub(crate) fn wrapped_reducer_from_config(
-    config: &Config,
-) -> Result<Box<dyn WrappedReducer>, Error> {
+pub(crate) fn reducer_kind_from_config(config: &Config) -> Result<ReducerKind, Error> {
     let name = &config.reducer_name;
     if let Some(func) = REDUCER_MAKER_REGISTRY.get(name) {
         func.0(config)
@@ -248,69 +241,38 @@ pub(crate) fn wrapped_reducer_from_config(
     }
 }
 
-/// A trait that primarily wraps a [`Reducer`] type in order to support
-/// dynamic dispatch.
-///
-/// The main purpose of this function is to help implement the
-/// [`crate::AccumulatorDescr`] type.
-///
-/// # Dynamic Dispatch vs "Enum Dispatch"
-///
-/// There isn't a particularly strong reason behind our choice of dynamic
-/// dispatch. We summarize some considerations down below, but we are very
-/// willing to change the implementation.
-///
-/// Our initial choice was primarily influenced by some concerns about an
-/// enum-dispatch approach:
-/// - I was originally concerned that enum-dispatch may not work very well
-///   with the dynamic plugin approach (for GPU support) that is briefly
-///   described in the module-level documentation of [`crate::accumulator`].
-///   Upon reflection, I realized that if [`AccumulatorDescr`] continues to
-///   treat the [`Config`] type in a similar way to its current treatment
-///   (i.e. the [`Config`] instance is stored alongside the [`WrappedReducer`]
-///   that was constructed from it and serves as the "source-of-truth" for
-///   serialization). **In other words, this isn't a significant concern.**
-/// - My main concern focuses on readability and maintainability:
-///   - there are "a lot" of Reducer variations to support. Combinatorics from
-///     generic types (especially when we want to make different choices for
-///     structure functions and correlation functions), significantly increase
-///     the number of variations...
-///   - Let's consider what it takes to add a new reducer:
-///     - under the current system, we just need to update [`build_registry`].
-///     - under an enum-system, we would need to update
-///       - [`build_registry`] (or whatever equivalent we shift to using).
-///       - The enum-system would also have equivalent methods for each method
-///         that this trait currently declares (there are 5 at the time of
-///         writing), and there would be a match statement over all variants.
-///         We would need to update the variant in every method.
-///     - while we could potentially use macros to reduce code duplication, I
-///       worry about readability
-///       - to be fair, we do now use a macro in [`WrappedIrregularHist`].
-///         With that said, this covers very special cases (that we may want
-///         to consider removing...).
-///       - if we don't remove [`WrappedIrregularHist`], we would need to have
-///         special handling in the enum-dispatch approach for these special
-///         cases (which could significantly complicate the macros)
-/// - At a surface-level, it might seem like the enum-system would let us
-///   remove all machinery to make [`Config`] implement the [`Eq`] trait
-///   (namely, the machinery to implement bin-edge equality checks)
-///   - in practice, that isn't really true.
-///   - performing equality checks for distance edge bins and Histogram
-///     reducers requires us to implement the vast majority of this machinery
-///     anyway.
-///
-/// There are some other considerations:
-/// - do we want to support a future where external code can implement new
-///   Reducers? (At the moment, we don't)
-/// - is the performance benefit of enum-dispatch significant
-///   - I'm sketipical, at the moment
-///   - But, I could totally see it being more important if we supported
-///     multiple reducers per accumulator.
-///
-/// Importantly, I'm happy to be proven wrong and change our approach. If
-/// anybody wants to implement an enum-dispatch approach, I would happily
-/// consider it!
-pub(crate) trait WrappedReducer {
+pub(crate) mod op {
+    use super::*;
+
+    use crate::reducers::get_output as reducers_get_output;
+    use pairstat_nostd_internal::reset_full_statepack as internal_reset_full_statepack;
+
+    /// Takes a Calls function (`func`) on:
+    ///   - the reducer expression (this can be refer to a variable holding a
+    ///     reducer or be an expression that returns a reducer)
+    ///   - other arguments (passed as arguments to `forward_reducer`)
+    ///
+    /// Examples:
+    /// ```text
+    /// forward_reducer!(make_reducer(config); func(reducer_ref, other_arg1, other_arg2));
+    /// # trailing comma is necessary for unary functions!
+    /// forward_reducer!(make_reducer(config); func(reducer_ref,));
+    /// ```
+    macro_rules! forward_reducer{
+        ($reducer:expr; $func:ident(reducer_ref, $($args:expr),*)) => {
+            {
+                match $reducer {
+                    ReducerKind::TPCFMean(r) => $func(&r, $($args),*),
+                    ReducerKind::TPCFHistRegular(r) =>  $func(&r, $($args),*),
+                    ReducerKind::TPCFHistIrregular(r) =>  $func(&r, $($args),*),
+                    ReducerKind::AstroSF1Mean(r) =>  $func(&r, $($args),*),
+                    ReducerKind::AstroSF1HistRegular(r) =>  $func(&r, $($args),*),
+                    ReducerKind::AstroSF1HistIrregular(r) =>  $func(&r, $($args),*),
+                }
+            }
+        }
+    }
+
     /// merge the state information tracked by `binned_statepack` and
     /// `other_binned_statepack`, and update `binned_statepack` accordingly
     ///
@@ -318,12 +280,16 @@ pub(crate) trait WrappedReducer {
     /// The `config` argument **must** be identical to the value passed
     /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
     /// implement the [`WrappedIrregularHist`] type
-    fn merge(
-        &self,
+    pub(crate) fn merge(
         binned_statepack: &mut StatePackViewMut,
         other_binned_statepack: &StatePackView,
         config: &Config,
-    );
+    ) {
+        forward_reducer!(
+            make_reducer(config);
+            merge_full_statepacks(reducer_ref, binned_statepack, other_binned_statepack)
+        )
+    }
 
     /// compute the output quantities from the accumulator's state and return
     /// the result in a HashMap.
@@ -332,11 +298,14 @@ pub(crate) trait WrappedReducer {
     /// The `config` argument **must** be identical to the value passed
     /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
     /// implement the [`WrappedIrregularHist`] type
-    fn get_output(
-        &self,
+    pub(crate) fn get_output(
         binned_statepack: &StatePackView,
         config: &Config,
-    ) -> HashMap<&'static str, Vec<f64>>;
+    ) -> HashMap<&'static str, Vec<f64>> {
+        forward_reducer!(
+            make_reducer(config); reducers_get_output(reducer_ref, binned_statepack)
+        )
+    }
 
     /// Reset the state within the binned statepack.
     ///
@@ -344,7 +313,11 @@ pub(crate) trait WrappedReducer {
     /// The `config` argument **must** be identical to the value passed
     /// into [`wrapped_reducer_from_config`]. it is _only_ used to help
     /// implement the [`wrappedirregularhist`] type
-    fn reset_full_statepack(&self, binned_statepack: &mut StatePackViewMut, config: &Config);
+    pub(crate) fn reset_full_statepack(binned_statepack: &mut StatePackViewMut, config: &Config) {
+        forward_reducer!(
+            make_reducer(config); internal_reset_full_statepack(reducer_ref, binned_statepack)
+        )
+    }
 
     /// Returns the size of individual accumulator states.
     ///
@@ -360,7 +333,16 @@ pub(crate) trait WrappedReducer {
     /// The `config` argument **must** be identical to the value passed
     /// into [`wrapped_reducer_from_config`]. It is _only_ used to help
     /// implement the [`WrappedIrregularHist`] type
-    fn accum_state_size(&self, config: &Config) -> usize;
+    pub(crate) fn accum_state_size(config: &Config) -> usize {
+        // this can't be a closure and accept a generic arg
+        fn f(reducer: &impl Reducer) -> usize {
+            reducer.accum_state_size()
+        }
+
+        forward_reducer!(
+            make_reducer(config); f(reducer_ref,) // the macro needs trailing `,`
+        )
+    }
 
     /// Executes the reduction on the supplied spatial data and updates
     /// binned_statepack accordingly.
@@ -384,183 +366,46 @@ pub(crate) trait WrappedReducer {
     /// wouldn't *need* to directly be a method attached to the enum, but the
     /// function would still need to have access to all the enum's details
     /// (in order to perform a match over every variant)
-    fn exec_reduction(
-        &self,
-        binned_statepack: &mut StatePackViewMut,
-        spatial_info: SpatialInfo,
-        config: &Config,
-    ) -> Result<(), Error>;
-}
-
-/// Represents a wrapped [`Reducer`].
-///
-/// This type wraps **any** kind of reducer, except for [`ScalarHistogram`]
-/// defined using the [`IrregularBinEdges`] type. That case requires special
-/// handling (see [`WrappedIrregularHist`] for more details).type for more details.
-///  This is a special case among reducers.  will be
-/// annoying. We will have to play a "game," where the [`Reducer`] doesn't
-/// have persistent state. Instead, we will have to pass in the config to each
-/// method and reconstruct the reducer exactly when we need it...
-struct WrappedReducerImpl<R: Reducer + Clone> {
-    reducer: R,
-    pair_op: PairOperation,
-}
-
-impl<R: Reducer + Clone> WrappedReducer for WrappedReducerImpl<R> {
-    fn merge(
-        &self,
-        binned_statepack: &mut StatePackViewMut,
-        other_binned_statepack: &StatePackView,
-        _config: &Config,
-    ) {
-        merge_full_statepacks(&self.reducer, binned_statepack, other_binned_statepack);
-    }
-
-    // we should probably let the caller provide the output memory
-    // (it would be nice if we could pass in a type that is more clearly
-    // immutable than StatePackViewMut)
-    fn get_output(
-        &self,
-        binned_statepack: &StatePackView,
-        _config: &Config,
-    ) -> HashMap<&'static str, Vec<f64>> {
-        get_output(&self.reducer, binned_statepack)
-    }
-
-    fn reset_full_statepack(&self, binned_statepack: &mut StatePackViewMut, _config: &Config) {
-        reset_full_statepack(&self.reducer, binned_statepack)
-    }
-
-    fn accum_state_size(&self, _config: &Config) -> usize {
-        self.reducer.accum_state_size()
-    }
-
-    // we probably need to pass other arguments...
-    fn exec_reduction(
-        &self,
+    pub(crate) fn exec_reduction(
         binned_statepack: &mut StatePackViewMut,
         spatial_info: SpatialInfo,
         config: &Config,
     ) -> Result<(), Error> {
-        exec_reduction_helper(
-            &self.reducer,
-            binned_statepack,
-            spatial_info,
-            &config.squared_distance_bin_edges,
-            self.pair_op,
-        )
-    }
-}
+        let reducer = make_reducer(config);
+        let pair_op = reducer.pair_op();
 
-/// Represents a [`ScalarHistogram`] with the [`IrregularBinEdges`] type.
-///
-/// # Note
-/// We have to play a "game," where the [`Reducer`] doesn't have persistent
-/// state. Instead, we reconstruct the reducer exactly when we need it.
-/// This is done to avoid lifetime issues in [`AccumulatorDescr`]
-struct WrappedIrregularHist {
-    pair_op: PairOperation,
-}
-
-/// Calls function with a temporary histogram reducer that has irregular
-/// bucket edges.
-///
-/// In more detail, this macro:
-/// - temporarily constructs a [`ScalarHistogram`] with the
-///   [`IrregularBinEdges`] type (using details from the provided
-///   [`PairOperation`] and [`Config`] arguments)
-/// - passes a reference to the temporary reducer to the specified function,
-///   as the first argument (replacing the `reducer_ref` placeholder), and
-///   return's the function's result
-/// - the temporary reducer is dropped as we leave scope.
-///
-/// In more detail, this is intended to reduce boilerplate code within
-/// [`WrappedIrregularHist`]. We could replace this with a function if we
-/// converted [`WrappedIrregularHist`] so that it is a generic type with
-/// respect to [`pairstat_nostd_internal::ScalarizeOp`]
-macro_rules! reconstruct_hist_reducer_and_forward{
-    ($pair_op:expr, $config:expr; $func:ident(reducer_ref, $($args:expr),*)) => {
-        {
-            let edges = match $config.hist_reducer_bucket {
-                Some(BinEdgeSpec::Vec(ref v)) => v.as_irregular_edge_view(),
-                _ => panic!("Bug: should be unreachable!"),
-            };
-            match $pair_op {
-                PairOperation::ElementwiseMultiply => {
-                    let my_reducer = ComponentSumHistogram::from_bin_edges(edges);
-                    $func(&my_reducer, $($args),*)
-                }
-                PairOperation::ElementwiseSub => {
-                    let my_reducer = EuclideanNormHistogram::from_bin_edges(edges);
-                    $func(&my_reducer, $($args),*)
-                }
-            }
-        }
-    }
-}
-
-impl WrappedReducer for WrappedIrregularHist {
-    fn merge(
-        &self,
-        binned_statepack: &mut StatePackViewMut,
-        other_binned_statepack: &StatePackView,
-        config: &Config,
-    ) {
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op,
-            config;
-            merge_full_statepacks(
-                reducer_ref,
-                binned_statepack,
-                other_binned_statepack
-            )
-        )
-    }
-
-    fn get_output(
-        &self,
-        binned_statepack: &StatePackView,
-        config: &Config,
-    ) -> HashMap<&'static str, Vec<f64>> {
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op, config; get_output(reducer_ref, binned_statepack)
-        )
-    }
-
-    fn reset_full_statepack(&self, binned_statepack: &mut StatePackViewMut, config: &Config) {
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op, config; reset_full_statepack(reducer_ref, binned_statepack)
-        )
-    }
-
-    fn accum_state_size(&self, config: &Config) -> usize {
-        // this can't be a closure and accept a generic arg
-        fn f(reducer: &impl Reducer) -> usize {
-            reducer.accum_state_size()
-        }
-
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op, config; f(reducer_ref,) // the macro needs trailing `,`
-        )
-    }
-
-    fn exec_reduction(
-        &self,
-        binned_statepack: &mut StatePackViewMut,
-        spatial_info: SpatialInfo,
-        config: &Config,
-    ) -> Result<(), Error> {
-        reconstruct_hist_reducer_and_forward!(
-            self.pair_op,
-            config;
+        forward_reducer!(
+            reducer;
             exec_reduction_helper(
                 reducer_ref,
                 binned_statepack,
                 spatial_info,
                 &config.squared_distance_bin_edges,
-                self.pair_op
+                pair_op
             )
         )
+    }
+}
+
+pub(crate) enum ReducerKind<'a> {
+    TPCFMean(ComponentSumMean),
+    TPCFHistRegular(ComponentSumHistogram<RegularBinEdges>),
+    TPCFHistIrregular(ComponentSumHistogram<IrregularBinEdges<'a>>),
+    AstroSF1Mean(EuclideanNormMean),
+    AstroSF1HistRegular(EuclideanNormHistogram<RegularBinEdges>),
+    AstroSF1HistIrregular(EuclideanNormHistogram<IrregularBinEdges<'a>>),
+}
+
+impl<'a> ReducerKind<'a> {
+    fn pair_op(&self) -> PairOperation {
+        match self {
+            Self::TPCFMean(_) => PairOperation::ElementwiseMultiply,
+            Self::TPCFHistRegular(_) => PairOperation::ElementwiseMultiply,
+            Self::TPCFHistIrregular(_) => PairOperation::ElementwiseMultiply,
+            Self::AstroSF1Mean(_) => PairOperation::ElementwiseSub,
+            Self::AstroSF1HistRegular(_) => PairOperation::ElementwiseSub,
+            Self::AstroSF1HistIrregular(_) => PairOperation::ElementwiseSub,
+        }
     }
 }
 
