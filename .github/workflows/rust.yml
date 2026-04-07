@@ -14,7 +14,7 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v6
     - name: Install Rust and rustfmt
       uses: dtolnay/rust-toolchain@master
       with:
@@ -50,7 +50,7 @@ jobs:
   rustfmt:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v6
     - name: Install Rust and rustfmt
       uses: dtolnay/rust-toolchain@master
       with:
@@ -62,7 +62,7 @@ jobs:
   build-docs:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v6
     - name: Install Rust and rustfmt
       uses: dtolnay/rust-toolchain@master
       with:
